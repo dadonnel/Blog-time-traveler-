@@ -197,7 +197,7 @@ def tier_sort_value(tier: str) -> int:
     return {"high": 0, "medium": 1, "low": 2}.get(tier, 99)
 
 
-def render_html(entries: list[ArchiveEntry], report_date: dt.date, years_back: int) -> str:
+def render_html(entries: list[ArchiveEntry], report_date: dt.date, year_offsets: list[int]) -> str:
     grouped: dict[int, list[ArchiveEntry]] = {}
     for item in entries:
         grouped.setdefault(item.year, []).append(item)
@@ -220,7 +220,8 @@ def render_html(entries: list[ArchiveEntry], report_date: dt.date, years_back: i
     chunks.append("<h1>Blog Time Traveler</h1>")
     chunks.append(
         f"<p class='meta'>Built on {html.escape(report_date.isoformat())}. "
-        f"Looking back {years_back} years for posts captured on {html.escape(report_date.strftime('%B %d'))}.</p>"
+        f"Looking back across offsets {html.escape(', '.join(str(o) for o in year_offsets))} years "
+        f"for posts captured on {html.escape(report_date.strftime('%B %d'))}.</p>"
     )
 
     if not years:
@@ -248,12 +249,36 @@ def render_html(entries: list[ArchiveEntry], report_date: dt.date, years_back: i
     return "\n".join(chunks)
 
 
+def build_default_year_offsets() -> list[int]:
+    """Return 1-5 years back, then 5-year increments through 35 years back."""
+    return [1, 2, 3, 4, 5, 10, 15, 20, 25, 30, 35]
+
+
+def build_year_offsets(years_back: int | None) -> list[int]:
+    if years_back is None:
+        return build_default_year_offsets()
+
+    if years_back < 1:
+        raise ValueError("--years-back must be at least 1")
+
+    return list(range(1, years_back + 1))
+
+
+
 def main() -> None:
     today = dt.date.today()
 
     parser = argparse.ArgumentParser(description="Build a day-matched historical blog link report from the Wayback Machine.")
     parser.add_argument("--output", default=DEFAULT_OUTPUT, help="Output HTML file path (default: blog_time_travel_report.html)")
-    parser.add_argument("--years-back", type=int, default=30, help="How many years to look back (default: 30)")
+    parser.add_argument(
+        "--years-back",
+        type=int,
+        default=None,
+        help=(
+            "How many years to look back contiguously (e.g., 30 for 1..30 years ago). "
+            "Default uses 1-5 years ago, then 5-year increments through 35 years ago."
+        ),
+    )
     parser.add_argument("--max-per-source-year", type=int, default=2, help="Max pages to include per source per year (default: 2)")
     parser.add_argument("--month", type=int, default=today.month, help="Month to query (default: current month)")
     parser.add_argument("--day", type=int, default=today.day, help="Day to query (default: current day)")
@@ -264,7 +289,8 @@ def main() -> None:
     all_entries: list[ArchiveEntry] = []
 
     current_year = today.year
-    for delta in range(1, args.years_back + 1):
+    year_offsets = build_year_offsets(args.years_back)
+    for delta in year_offsets:
         year = current_year - delta
         try:
             _ = dt.date(year, args.month, args.day)
@@ -279,7 +305,7 @@ def main() -> None:
         )
         all_entries.extend(year_entries)
 
-    document = render_html(all_entries, report_date=today, years_back=args.years_back)
+    document = render_html(all_entries, report_date=today, year_offsets=year_offsets)
     output_path.write_text(document, encoding="utf-8")
     print(f"Wrote {len(all_entries)} entries to {output_path}")
 

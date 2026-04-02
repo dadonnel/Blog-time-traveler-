@@ -1,6 +1,6 @@
 # Blog Time Traveler
 
-`daily_blog_time_traveler.py` builds a daily HTML report of archived blog posts that were captured on this calendar day in prior years (1..30 years back by default), using the Internet Archive Wayback Machine CDX API.
+`daily_blog_time_traveler.py` builds a daily HTML report of archived blog posts that were captured on this calendar day in prior years (1-5 years back, then every 5 years up to 35 years back by default), using the Internet Archive Wayback Machine CDX API.
 
 ## What it does
 
@@ -23,7 +23,7 @@ python3 daily_blog_time_traveler.py --help
 Useful flags:
 
 - `--output blog_time_travel_report.html`
-- `--years-back 30`
+- `--years-back 30` (optional contiguous range override: 1..30 years ago)
 - `--max-per-source-year 2`
 - `--month 4 --day 2` (override today)
 
