@@ -148,6 +148,11 @@ def choose_entries(captures: Iterable[tuple[str, str]], sample_size: int) -> lis
     return sorted(items[:sample_size], key=lambda x: x[0])
 
 
+def log_step(message: str) -> None:
+    stamp = dt.datetime.now().strftime("%H:%M:%S")
+    print(f"[{stamp}] {message}")
+
+
 def collect_for_year(
     year: int,
     month: int,
@@ -157,14 +162,18 @@ def collect_for_year(
 ) -> list[ArchiveEntry]:
     target = dt.date(year, month, day)
     entries: list[ArchiveEntry] = []
+    log_step(f"Year {year}: collecting captures for {target.strftime('%B %d')} across {len(SOURCES)} sources")
 
-    for src in SOURCES:
+    for index, src in enumerate(SOURCES, start=1):
+        log_step(f"Year {year}: [{index}/{len(SOURCES)}] querying {src.blog_name}")
         try:
             captures = cdx_query(src.base_url, target, max_results=max(40, max_per_source_year * 5))
-        except RuntimeError:
+        except RuntimeError as exc:
+            log_step(f"Year {year}: {src.blog_name} query failed ({exc})")
             continue
 
         sampled = choose_entries(captures, max_per_source_year)
+        log_step(f"Year {year}: {src.blog_name} returned {len(captures)} captures, keeping {len(sampled)}")
         for timestamp, original in sampled:
             archive_url = f"{WAYBACK_REPLAY_PREFIX}/{timestamp}/{original}"
             title = "(title unavailable)"
@@ -190,6 +199,9 @@ def collect_for_year(
                 )
             )
             time.sleep(request_pause_seconds)
+        if sampled:
+            log_step(f"Year {year}: completed {src.blog_name}")
+    log_step(f"Year {year}: done, collected {len(entries)} entries")
     return entries
 
 
@@ -284,18 +296,22 @@ def main() -> None:
     parser.add_argument("--day", type=int, default=today.day, help="Day to query (default: current day)")
     parser.add_argument("--pause", type=float, default=0.15, help="Seconds to pause between replay fetches (default: 0.15)")
     args = parser.parse_args()
+    log_step("Starting Blog Time Traveler run")
 
     output_path = Path(args.output)
     all_entries: list[ArchiveEntry] = []
 
     current_year = today.year
     year_offsets = build_year_offsets(args.years_back)
+    log_step(f"Using date {args.month:02d}-{args.day:02d} and year offsets: {', '.join(str(v) for v in year_offsets)}")
     for delta in year_offsets:
         year = current_year - delta
         try:
             _ = dt.date(year, args.month, args.day)
         except ValueError:
+            log_step(f"Skipping year {year}: invalid date {args.month:02d}-{args.day:02d}")
             continue
+        log_step(f"Processing year {year} ({delta} year(s) back)")
         year_entries = collect_for_year(
             year=year,
             month=args.month,
@@ -304,10 +320,12 @@ def main() -> None:
             request_pause_seconds=args.pause,
         )
         all_entries.extend(year_entries)
+        log_step(f"Year {year} complete: running total is {len(all_entries)} entries")
 
+    log_step("Rendering HTML report")
     document = render_html(all_entries, report_date=today, year_offsets=year_offsets)
     output_path.write_text(document, encoding="utf-8")
-    print(f"Wrote {len(all_entries)} entries to {output_path}")
+    log_step(f"Wrote {len(all_entries)} entries to {output_path}")
 
 
 if __name__ == "__main__":
