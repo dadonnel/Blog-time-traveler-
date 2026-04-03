@@ -105,30 +105,58 @@ def cdx_query(base_url: str, day: dt.date, max_results: int) -> list[tuple[str, 
     from_ts = day.strftime("%Y%m%d") + "000000"
     to_ts = day.strftime("%Y%m%d") + "235959"
 
-    params = {
+    common_params = {
         "url": urllib.parse.urljoin(base_url, "*"),
         "from": from_ts,
         "to": to_ts,
         "filter": ["statuscode:200", "mimetype:text/html"],
         "fl": "timestamp,original",
-        "output": "json",
         "collapse": "urlkey",
         "limit": str(max_results),
     }
 
-    query = urllib.parse.urlencode(params, doseq=True)
-    url = f"{CDX_ENDPOINT}?{query}"
-    payload = fetch_json(url)
-    if not payload or len(payload) <= 1:
-        return []
+    # Primary path: JSON output.
+    json_params = dict(common_params)
+    json_params["output"] = "json"
+    json_query = urllib.parse.urlencode(json_params, doseq=True)
+    json_url = f"{CDX_ENDPOINT}?{json_query}"
 
-    rows = payload[1:]  # Skip header.
     cleaned: list[tuple[str, str]] = []
-    for row in rows:
-        if not isinstance(row, list) or len(row) < 2:
+    try:
+        payload = fetch_json(json_url)
+        if payload and len(payload) > 1:
+            rows = payload[1:]  # Skip header.
+            for row in rows:
+                if not isinstance(row, list) or len(row) < 2:
+                    continue
+                ts, original = row[0], row[1]
+                cleaned.append((ts, original))
+    except RuntimeError:
+        # Fall back to text mode; some environments/proxies intermittently
+        # reject or mangle JSON responses for this endpoint.
+        pass
+
+    if cleaned:
+        return cleaned
+
+    # Fallback path: plain-text output where each row is:
+    # "<timestamp> <original-url>"
+    text_params = dict(common_params)
+    text_params["output"] = "txt"
+    text_query = urllib.parse.urlencode(text_params, doseq=True)
+    text_url = f"{CDX_ENDPOINT}?{text_query}"
+    text_payload = fetch_text(text_url, retries=3)
+
+    for line in text_payload.splitlines():
+        line = line.strip()
+        if not line:
             continue
-        ts, original = row[0], row[1]
-        cleaned.append((ts, original))
+        parts = line.split(" ", 1)
+        if len(parts) != 2:
+            continue
+        ts, original = parts[0].strip(), parts[1].strip()
+        if ts and original:
+            cleaned.append((ts, original))
     return cleaned
 
 
