@@ -26,6 +26,17 @@ Useful flags:
 - `--years-back 30` (optional contiguous range override: 1..30 years ago)
 - `--max-per-source-year 2`
 - `--month 4 --day 2` (override today)
+- `--discover-sources --max-discovered-per-seed 3` (discover additional blogs from seed pages each run)
+
+## Dynamic source discovery
+
+By default, the script uses a curated seed list of blogs. If you pass `--discover-sources`, it will also:
+
+- Crawl each seed blog's homepage.
+- Extract outbound links that look blog-like (e.g., `blog`, `news`, `posts`, `articles`).
+- Add a capped number of newly discovered domains per seed (`--max-discovered-per-seed`).
+
+This helps diversify the set of blogs queried for each date while preserving the stable seed list.
 
 ## Daily schedule (cron)
 
