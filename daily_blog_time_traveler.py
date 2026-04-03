@@ -103,13 +103,29 @@ def fetch_json(url: str, timeout: int = 30, retries: int = 3, sleep_base: float 
     raise RuntimeError(f"Failed to fetch JSON from {url}: {last_error}")
 
 
-def fetch_text(url: str, timeout: int = 30, retries: int = 2):
+def fetch_text(
+    url: str,
+    timeout: int = 30,
+    retries: int = 2,
+    max_bytes: int = 160_000,
+    use_stream_read: bool = False,
+):
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     last_error: Exception | None = None
     for attempt in range(retries):
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
-                body = response.read(160_000)
+                if use_stream_read:
+                    chunks: list[bytes] = []
+                    total = 0
+                    for chunk in iter(lambda: response.read(8192), b""):
+                        chunks.append(chunk)
+                        total += len(chunk)
+                        if total >= max_bytes:
+                            break
+                    body = b"".join(chunks)
+                else:
+                    body = response.read(max_bytes)
                 return body.decode("utf-8", errors="replace")
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
             last_error = exc
@@ -243,7 +259,13 @@ def cdx_query(base_url: str, day: dt.date, max_results: int) -> list[tuple[str, 
     text_params["output"] = "txt"
     text_query = urllib.parse.urlencode(text_params, doseq=True)
     text_url = f"{CDX_ENDPOINT}?{text_query}"
-    text_payload = fetch_text(text_url, retries=3)
+    text_payload = fetch_text(
+        text_url,
+        timeout=20,
+        retries=2,
+        max_bytes=120_000,
+        use_stream_read=True,
+    )
 
     for line in text_payload.splitlines():
         line = line.strip()
