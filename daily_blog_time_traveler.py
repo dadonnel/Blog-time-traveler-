@@ -390,6 +390,7 @@ def cdx_query(
     json_url = f"{CDX_ENDPOINT}?{json_query}"
 
     cleaned: list[tuple[str, str]] = []
+    json_error: RuntimeError | None = None
     try:
         payload = fetch_json(
             json_url,
@@ -404,38 +405,81 @@ def cdx_query(
                     continue
                 ts, original = row[0], row[1]
                 cleaned.append((ts, original))
-    except RuntimeError:
+    except RuntimeError as exc:
+        json_error = exc
+        log_step(
+            "CDX JSON query failed for "
+            f"{base_url} ({day.isoformat()}), timeout={request_timeout_seconds}s retries={retries}: {exc}"
+        )
         # Fall back to text mode; some environments/proxies intermittently
         # reject or mangle JSON responses for this endpoint.
         pass
 
     if cleaned:
+        log_step(
+            "CDX JSON query succeeded for "
+            f"{base_url} ({day.isoformat()}): {len(cleaned)} captures (limit={max_results})"
+        )
         return cleaned
 
     # Fallback path: plain-text output where each row is:
     # "<timestamp> <original-url>"
     text_params = dict(common_params)
     text_params["output"] = "txt"
-    text_query = urllib.parse.urlencode(text_params, doseq=True)
-    text_url = f"{CDX_ENDPOINT}?{text_query}"
-    text_payload = fetch_text(
-        text_url,
-        timeout=max(1, request_timeout_seconds),
-        retries=max(1, retries),
-        max_bytes=120_000,
-        use_stream_read=True,
-    )
+    text_attempt_limits = []
+    initial_limit = max_results
+    if initial_limit > 20:
+        text_attempt_limits.append(initial_limit)
+        text_attempt_limits.append(max(20, initial_limit // 2))
+    else:
+        text_attempt_limits.append(initial_limit)
 
-    for line in text_payload.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split(" ", 1)
-        if len(parts) != 2:
-            continue
-        ts, original = parts[0].strip(), parts[1].strip()
-        if ts and original:
-            cleaned.append((ts, original))
+    text_error: RuntimeError | None = None
+    for attempt_limit in text_attempt_limits:
+        text_params["limit"] = str(attempt_limit)
+        text_query = urllib.parse.urlencode(text_params, doseq=True)
+        text_url = f"{CDX_ENDPOINT}?{text_query}"
+        try:
+            text_payload = fetch_text(
+                text_url,
+                timeout=max(1, request_timeout_seconds + 5),
+                retries=max(2, retries + 1),
+                max_bytes=120_000,
+                use_stream_read=True,
+            )
+            for line in text_payload.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split(" ", 1)
+                if len(parts) != 2:
+                    continue
+                ts, original = parts[0].strip(), parts[1].strip()
+                if ts and original:
+                    cleaned.append((ts, original))
+            if cleaned:
+                log_step(
+                    "CDX text fallback succeeded for "
+                    f"{base_url} ({day.isoformat()}): {len(cleaned)} captures (limit={attempt_limit})"
+                )
+                return cleaned
+            log_step(
+                "CDX text fallback returned no rows for "
+                f"{base_url} ({day.isoformat()}) with limit={attempt_limit}"
+            )
+        except RuntimeError as exc:
+            text_error = exc
+            log_step(
+                "CDX text fallback failed for "
+                f"{base_url} ({day.isoformat()}), limit={attempt_limit}, "
+                f"timeout={request_timeout_seconds + 5}s retries={max(2, retries + 1)}: {exc}"
+            )
+
+    if json_error or text_error:
+        raise RuntimeError(
+            "CDX query exhausted all modes. "
+            f"JSON error: {json_error}; text error: {text_error}; base_url={base_url}; date={day.isoformat()}"
+        )
     return cleaned
 
 
@@ -457,7 +501,7 @@ def choose_entries(captures: Iterable[tuple[str, str]], sample_size: int) -> lis
 
 def log_step(message: str) -> None:
     stamp = dt.datetime.now().strftime("%H:%M:%S")
-    print(f"[{stamp}] {message}")
+    print(f"[{stamp}] {message}", flush=True)
 
 
 def collect_for_year(
@@ -485,7 +529,10 @@ def collect_for_year(
                 retries=cdx_retries,
             )
         except RuntimeError as exc:
-            log_step(f"Year {year}: {src.blog_name} query failed ({exc})")
+            log_step(
+                f"Year {year}: {src.blog_name} query failed "
+                f"(base={src.base_url}, timeout={cdx_request_timeout_seconds}s, retries={cdx_retries}) - {exc}"
+            )
             continue
 
         sampled = choose_entries(captures, max_per_source_year)
