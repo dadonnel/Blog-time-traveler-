@@ -63,3 +63,7 @@ Example cron entry (runs every day at 6:10 AM UTC):
 ```
 
 The report is regenerated each run.
+
+## Era/platform research notes
+
+See `RESEARCH_ERA_BLOG_PLATFORMS.md` for a 35-year era map of major blogging services and date-based discovery methods to improve source variety.
