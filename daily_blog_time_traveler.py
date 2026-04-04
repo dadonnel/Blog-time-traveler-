@@ -23,6 +23,7 @@ from typing import Iterable
 
 CDX_ENDPOINT = "https://web.archive.org/cdx/search/cdx"
 WAYBACK_REPLAY_PREFIX = "https://web.archive.org/web"
+HN_SEARCH_ENDPOINT = "https://hn.algolia.com/api/v1/search_by_date"
 DEFAULT_OUTPUT = "blog_time_travel_report.html"
 USER_AGENT = "BlogTimeTraveler/1.0 (+https://web.archive.org)"
 
@@ -33,7 +34,7 @@ class BlogSource:
     base_url: str
     subject: str
     popularity: str  # high | medium | low
-    origin: str = "seed"  # seed | discovered
+    origin: str = "seed"  # seed | discovered | discovered-hn
 
 
 @dataclass
@@ -103,13 +104,12 @@ def fetch_json(url: str, timeout: int = 30, retries: int = 3, sleep_base: float 
     raise RuntimeError(f"Failed to fetch JSON from {url}: {last_error}")
 
 
-def fetch_text(
-    url: str,
-    timeout: int = 30,
-    retries: int = 2,
-    max_bytes: int = 160_000,
-    use_stream_read: bool = False,
-):
+def fetch_json_url_params(base_url: str, params: dict[str, str], timeout: int = 30):
+    query = urllib.parse.urlencode(params)
+    return fetch_json(f"{base_url}?{query}", timeout=timeout)
+
+
+def fetch_text(url: str, timeout: int = 30, retries: int = 2):
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     last_error: Exception | None = None
     for attempt in range(retries):
@@ -173,8 +173,10 @@ def extract_candidate_urls(document: str, base_url: str) -> list[str]:
         if not href:
             continue
         resolved = urllib.parse.urljoin(base_url, href)
+        if not looks_like_blog_url(resolved):
+            continue
         canonical = canonical_source_url(resolved)
-        if canonical and looks_like_blog_url(canonical):
+        if canonical:
             candidates.append(canonical)
     return candidates
 
@@ -213,6 +215,145 @@ def discover_sources_from_seeds(
                 break
         time.sleep(pause_seconds)
     return discovered
+
+
+def discover_sources_from_hn(day: dt.date, max_sources: int) -> list[BlogSource]:
+    start = int(dt.datetime(day.year, day.month, day.day, 0, 0, tzinfo=dt.timezone.utc).timestamp())
+    end = int(dt.datetime(day.year, day.month, day.day, 23, 59, 59, tzinfo=dt.timezone.utc).timestamp())
+    page = 0
+    per_page = 100
+    seen_domains: set[str] = set()
+    discovered: list[BlogSource] = []
+
+    while len(discovered) < max_sources:
+        params = {
+            "tags": "story",
+            "numericFilters": f"created_at_i>={start},created_at_i<={end}",
+            "hitsPerPage": str(per_page),
+            "page": str(page),
+        }
+        payload = fetch_json_url_params(HN_SEARCH_ENDPOINT, params)
+        hits = payload.get("hits", []) if isinstance(payload, dict) else []
+        if not hits:
+            break
+
+        for item in hits:
+            if len(discovered) >= max_sources:
+                break
+            if not isinstance(item, dict):
+                continue
+            raw_url = item.get("url")
+            if not isinstance(raw_url, str) or not raw_url.strip():
+                continue
+            canonical = canonical_source_url(raw_url)
+            if not canonical or not looks_like_blog_url(canonical):
+                continue
+            domain = domain_from_url(canonical)
+            if not domain or domain in seen_domains:
+                continue
+            seen_domains.add(domain)
+            discovered.append(
+                BlogSource(
+                    blog_name=make_blog_name(canonical),
+                    base_url=canonical,
+                    subject="Technology",
+                    popularity="low",
+                    origin="discovered-hn",
+                )
+            )
+
+        nb_pages = payload.get("nbPages", 0) if isinstance(payload, dict) else 0
+        if page >= (nb_pages - 1):
+            break
+        page += 1
+
+    return discovered
+
+
+def load_source_registry(path: Path) -> dict[str, dict[str, str | int]]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    cleaned: dict[str, dict[str, str | int]] = {}
+    for domain, record in payload.items():
+        if not isinstance(domain, str) or not isinstance(record, dict):
+            continue
+        base_url = record.get("base_url")
+        if not isinstance(base_url, str) or not base_url:
+            continue
+        cleaned[domain] = {
+            "blog_name": str(record.get("blog_name", make_blog_name(base_url))),
+            "base_url": base_url,
+            "subject": str(record.get("subject", "Technology")),
+            "popularity": str(record.get("popularity", "low")),
+            "origin": str(record.get("origin", "discovered")),
+            "success_count": int(record.get("success_count", 0)),
+            "last_seen": str(record.get("last_seen", "")),
+        }
+    return cleaned
+
+
+def registry_to_sources(registry: dict[str, dict[str, str | int]], max_sources: int) -> list[BlogSource]:
+    ranked = sorted(
+        registry.values(),
+        key=lambda x: (int(x.get("success_count", 0)), str(x.get("last_seen", ""))),
+        reverse=True,
+    )
+    selected: list[BlogSource] = []
+    for record in ranked[:max_sources]:
+        base_url = str(record.get("base_url", ""))
+        if not base_url:
+            continue
+        selected.append(
+            BlogSource(
+                blog_name=str(record.get("blog_name", make_blog_name(base_url))),
+                base_url=base_url,
+                subject=str(record.get("subject", "Technology")),
+                popularity=str(record.get("popularity", "low")),
+                origin=str(record.get("origin", "discovered")),
+            )
+        )
+    return selected
+
+
+def update_source_registry(
+    registry: dict[str, dict[str, str | int]],
+    run_sources: list[BlogSource],
+    entries: list[ArchiveEntry],
+    seen_date: dt.date,
+) -> dict[str, dict[str, str | int]]:
+    captures_by_domain: dict[str, int] = {}
+    for entry in entries:
+        domain = domain_from_url(entry.original_url)
+        if not domain:
+            continue
+        captures_by_domain[domain] = captures_by_domain.get(domain, 0) + 1
+
+    for src in run_sources:
+        domain = domain_from_url(src.base_url)
+        if not domain:
+            continue
+        existing = registry.get(domain, {})
+        registry[domain] = {
+            "blog_name": src.blog_name,
+            "base_url": src.base_url,
+            "subject": src.subject,
+            "popularity": src.popularity,
+            "origin": src.origin,
+            "success_count": int(existing.get("success_count", 0)) + captures_by_domain.get(domain, 0),
+            "last_seen": seen_date.isoformat(),
+        }
+    return registry
+
+
+def save_source_registry(path: Path, registry: dict[str, dict[str, str | int]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(registry, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def cdx_query(base_url: str, day: dt.date, max_results: int) -> list[tuple[str, str]]:
@@ -455,12 +596,50 @@ def main() -> None:
         default=2,
         help="Max additional sources discovered from each seed source (default: 2).",
     )
+    parser.add_argument(
+        "--discover-hn",
+        action="store_true",
+        help="Discover additional sources from Hacker News story links for the selected month/day in the current year.",
+    )
+    parser.add_argument(
+        "--max-hn-sources",
+        type=int,
+        default=20,
+        help="Max sources to add from Hacker News discovery (default: 20).",
+    )
+    parser.add_argument(
+        "--source-registry",
+        default=".blog_source_registry.json",
+        help="JSON file used to persist discovered sources and prior success counts.",
+    )
+    parser.add_argument(
+        "--max-registry-sources",
+        type=int,
+        default=50,
+        help="Max sources to load from the source registry (default: 50).",
+    )
+    parser.add_argument(
+        "--disable-registry",
+        action="store_true",
+        help="Disable loading/saving of discovered source registry data.",
+    )
     args = parser.parse_args()
     log_step("Starting Blog Time Traveler run")
 
     output_path = Path(args.output)
     all_entries: list[ArchiveEntry] = []
     run_sources = list(SOURCES)
+    registry_path = Path(args.source_registry)
+    registry: dict[str, dict[str, str | int]] = {}
+
+    if not args.disable_registry:
+        registry = load_source_registry(registry_path)
+        registry_sources = registry_to_sources(registry, max_sources=max(0, args.max_registry_sources))
+        existing_domains = {domain_from_url(src.base_url) for src in run_sources}
+        new_registry_sources = [src for src in registry_sources if domain_from_url(src.base_url) not in existing_domains]
+        run_sources.extend(new_registry_sources)
+        if new_registry_sources:
+            log_step(f"Loaded {len(new_registry_sources)} sources from registry {registry_path}")
 
     if args.discover_sources:
         log_step("Discovering additional sources from seed blogs")
@@ -474,6 +653,17 @@ def main() -> None:
             log_step(f"Discovered {len(discovered)} additional sources; total source count is {len(run_sources)}")
         else:
             log_step("No additional sources discovered; continuing with seed list")
+    if args.discover_hn:
+        hn_day = dt.date(today.year, args.month, args.day)
+        try:
+            log_step(f"Discovering sources from Hacker News for {hn_day.isoformat()}")
+            hn_sources = discover_sources_from_hn(hn_day, max_sources=max(0, args.max_hn_sources))
+            existing_domains = {domain_from_url(src.base_url) for src in run_sources}
+            new_hn_sources = [src for src in hn_sources if domain_from_url(src.base_url) not in existing_domains]
+            run_sources.extend(new_hn_sources)
+            log_step(f"Discovered {len(new_hn_sources)} Hacker News sources; total source count is {len(run_sources)}")
+        except RuntimeError as exc:
+            log_step(f"Hacker News discovery failed ({exc}); continuing without HN-discovered sources")
 
     current_year = today.year
     year_offsets = build_year_offsets(args.years_back)
@@ -501,6 +691,10 @@ def main() -> None:
     document = render_html(all_entries, report_date=today, year_offsets=year_offsets)
     output_path.write_text(document, encoding="utf-8")
     log_step(f"Wrote {len(all_entries)} entries to {output_path}")
+    if not args.disable_registry:
+        updated = update_source_registry(registry, run_sources, all_entries, seen_date=today)
+        save_source_registry(registry_path, updated)
+        log_step(f"Updated source registry at {registry_path} with {len(updated)} domains")
 
 
 if __name__ == "__main__":
