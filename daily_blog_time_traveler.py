@@ -380,62 +380,66 @@ def cdx_query(
         "filter": ["statuscode:200", "mimetype:text/html"],
         "fl": "timestamp,original",
         "collapse": "urlkey",
-        "limit": str(max_results),
     }
 
-    # Primary path: JSON output.
-    json_params = dict(common_params)
-    json_params["output"] = "json"
-    json_query = urllib.parse.urlencode(json_params, doseq=True)
-    json_url = f"{CDX_ENDPOINT}?{json_query}"
+    # Try the requested limit, then progressively lighter index scans for large
+    # domains that can otherwise timeout (e.g., broad wildcard news sites).
+    limit_attempts = [max(1, max_results)]
+    for fallback_limit in (20, 10, 5):
+        if fallback_limit < max_results and fallback_limit not in limit_attempts:
+            limit_attempts.append(fallback_limit)
 
     cleaned: list[tuple[str, str]] = []
     json_error: RuntimeError | None = None
-    try:
-        payload = fetch_json(
-            json_url,
-            timeout=max(1, request_timeout_seconds),
-            retries=max(1, retries),
-            sleep_base=0.5,
-        )
-        if payload and len(payload) > 1:
-            rows = payload[1:]  # Skip header.
-            for row in rows:
-                if not isinstance(row, list) or len(row) < 2:
-                    continue
-                ts, original = row[0], row[1]
-                cleaned.append((ts, original))
-    except RuntimeError as exc:
-        json_error = exc
-        log_step(
-            "CDX JSON query failed for "
-            f"{base_url} ({day.isoformat()}), timeout={request_timeout_seconds}s retries={retries}: {exc}"
-        )
-        # Fall back to text mode; some environments/proxies intermittently
-        # reject or mangle JSON responses for this endpoint.
-        pass
-
-    if cleaned:
-        log_step(
-            "CDX JSON query succeeded for "
-            f"{base_url} ({day.isoformat()}): {len(cleaned)} captures (limit={max_results})"
-        )
-        return cleaned
+    for attempt_limit in limit_attempts:
+        json_params = dict(common_params)
+        json_params["limit"] = str(attempt_limit)
+        json_params["output"] = "json"
+        json_query = urllib.parse.urlencode(json_params, doseq=True)
+        json_url = f"{CDX_ENDPOINT}?{json_query}"
+        try:
+            payload = fetch_json(
+                json_url,
+                timeout=max(1, request_timeout_seconds),
+                retries=max(1, retries),
+                sleep_base=0.5,
+            )
+            if payload and len(payload) > 1:
+                rows = payload[1:]  # Skip header.
+                for row in rows:
+                    if not isinstance(row, list) or len(row) < 2:
+                        continue
+                    ts, original = row[0], row[1]
+                    cleaned.append((ts, original))
+            if cleaned:
+                log_step(
+                    "CDX JSON query succeeded for "
+                    f"{base_url} ({day.isoformat()}): {len(cleaned)} captures (limit={attempt_limit})"
+                )
+                return cleaned
+            log_step(
+                "CDX JSON query returned no rows for "
+                f"{base_url} ({day.isoformat()}) with limit={attempt_limit}"
+            )
+        except RuntimeError as exc:
+            json_error = exc
+            log_step(
+                "CDX JSON query failed for "
+                f"{base_url} ({day.isoformat()}), limit={attempt_limit}, "
+                f"timeout={request_timeout_seconds}s retries={retries}: {exc}"
+            )
+            # Fall back to text mode; some environments/proxies intermittently
+            # reject or mangle JSON responses for this endpoint.
+            continue
 
     # Fallback path: plain-text output where each row is:
     # "<timestamp> <original-url>"
-    text_params = dict(common_params)
-    text_params["output"] = "txt"
-    text_attempt_limits = []
-    initial_limit = max_results
-    if initial_limit > 20:
-        text_attempt_limits.append(initial_limit)
-        text_attempt_limits.append(max(20, initial_limit // 2))
-    else:
-        text_attempt_limits.append(initial_limit)
+    text_attempt_limits = list(limit_attempts)
 
     text_error: RuntimeError | None = None
     for attempt_limit in text_attempt_limits:
+        text_params = dict(common_params)
+        text_params["output"] = "txt"
         text_params["limit"] = str(attempt_limit)
         text_query = urllib.parse.urlencode(text_params, doseq=True)
         text_url = f"{CDX_ENDPOINT}?{text_query}"
