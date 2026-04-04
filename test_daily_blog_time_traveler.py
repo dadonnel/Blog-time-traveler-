@@ -1,6 +1,7 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import daily_blog_time_traveler as btt
 
@@ -50,6 +51,45 @@ class DiscoveryHelpersTest(unittest.TestCase):
             loaded = btt.load_source_registry(path)
             self.assertIn("example.com", loaded)
             self.assertEqual(loaded["example.com"]["success_count"], 1)
+
+
+class CdxQueryFallbackTest(unittest.TestCase):
+    def test_cdx_query_retries_json_with_smaller_limits(self):
+        calls: list[str] = []
+
+        def fake_fetch_json(url: str, timeout: int = 0, retries: int = 0, sleep_base: float = 0.0):
+            calls.append(url)
+            if "limit=40" in url:
+                raise RuntimeError("timed out")
+            return [["timestamp", "original"], ["20250404120000", "https://example.com/post"]]
+
+        with patch.object(btt, "fetch_json", side_effect=fake_fetch_json):
+            rows = btt.cdx_query("https://example.com/", btt.dt.date(2025, 4, 4), max_results=40)
+
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(any("output=json" in call and "limit=20" in call for call in calls))
+
+    def test_cdx_query_falls_back_to_text_after_json_failures(self):
+        def fake_fetch_json(url: str, timeout: int = 0, retries: int = 0, sleep_base: float = 0.0):
+            raise RuntimeError("json failed")
+
+        def fake_fetch_text(
+            url: str,
+            timeout: int = 0,
+            retries: int = 0,
+            max_bytes: int = 0,
+            use_stream_read: bool = False,
+        ):
+            if "limit=20" in url:
+                return "20250404120000 https://example.com/post\n"
+            raise RuntimeError("text failed")
+
+        with patch.object(btt, "fetch_json", side_effect=fake_fetch_json), patch.object(
+            btt, "fetch_text", side_effect=fake_fetch_text
+        ):
+            rows = btt.cdx_query("https://example.com/", btt.dt.date(2025, 4, 4), max_results=40)
+
+        self.assertEqual(rows, [("20250404120000", "https://example.com/post")])
 
 
 if __name__ == "__main__":
