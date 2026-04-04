@@ -25,6 +25,7 @@ Useful flags:
 - `--output blog_time_travel_report.html`
 - `--years-back 30` (optional contiguous range override: 1..30 years ago)
 - `--max-per-source-year 2`
+- `--cdx-timeout 10 --cdx-retries 2` (reduce wait time per source if CDX is slow)
 - `--month 4 --day 2` (override today)
 - `--discover-sources --max-discovered-per-seed 3` (discover additional blogs from seed pages each run)
 - `--discover-hn --max-hn-sources 25` (discover blog-like sources from Hacker News links for the selected month/day)
