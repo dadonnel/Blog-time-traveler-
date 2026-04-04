@@ -13,6 +13,7 @@ import html
 import json
 import random
 import re
+import socket
 import time
 import urllib.error
 import urllib.parse
@@ -98,7 +99,7 @@ def fetch_json(url: str, timeout: int = 30, retries: int = 3, sleep_base: float 
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 return json.loads(response.read().decode("utf-8", errors="replace"))
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as exc:
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout, json.JSONDecodeError) as exc:
             last_error = exc
             time.sleep(sleep_base * (attempt + 1))
     raise RuntimeError(f"Failed to fetch JSON from {url}: {last_error}")
@@ -133,7 +134,7 @@ def fetch_text(
                 else:
                     body = response.read(max_bytes)
                 return body.decode("utf-8", errors="replace")
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout) as exc:
             last_error = exc
             time.sleep(0.5 * (attempt + 1))
     raise RuntimeError(f"Failed to fetch text from {url}: {last_error}")
@@ -362,7 +363,13 @@ def save_source_registry(path: Path, registry: dict[str, dict[str, str | int]]) 
     path.write_text(json.dumps(registry, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def cdx_query(base_url: str, day: dt.date, max_results: int) -> list[tuple[str, str]]:
+def cdx_query(
+    base_url: str,
+    day: dt.date,
+    max_results: int,
+    request_timeout_seconds: int = 10,
+    retries: int = 2,
+) -> list[tuple[str, str]]:
     from_ts = day.strftime("%Y%m%d") + "000000"
     to_ts = day.strftime("%Y%m%d") + "235959"
 
@@ -384,7 +391,12 @@ def cdx_query(base_url: str, day: dt.date, max_results: int) -> list[tuple[str, 
 
     cleaned: list[tuple[str, str]] = []
     try:
-        payload = fetch_json(json_url)
+        payload = fetch_json(
+            json_url,
+            timeout=max(1, request_timeout_seconds),
+            retries=max(1, retries),
+            sleep_base=0.5,
+        )
         if payload and len(payload) > 1:
             rows = payload[1:]  # Skip header.
             for row in rows:
@@ -408,8 +420,8 @@ def cdx_query(base_url: str, day: dt.date, max_results: int) -> list[tuple[str, 
     text_url = f"{CDX_ENDPOINT}?{text_query}"
     text_payload = fetch_text(
         text_url,
-        timeout=20,
-        retries=2,
+        timeout=max(1, request_timeout_seconds),
+        retries=max(1, retries),
         max_bytes=120_000,
         use_stream_read=True,
     )
@@ -455,6 +467,8 @@ def collect_for_year(
     max_per_source_year: int,
     request_pause_seconds: float,
     sources: list[BlogSource],
+    cdx_request_timeout_seconds: int,
+    cdx_retries: int,
 ) -> list[ArchiveEntry]:
     target = dt.date(year, month, day)
     entries: list[ArchiveEntry] = []
@@ -463,7 +477,13 @@ def collect_for_year(
     for index, src in enumerate(sources, start=1):
         log_step(f"Year {year}: [{index}/{len(sources)}] querying {src.blog_name} ({src.origin})")
         try:
-            captures = cdx_query(src.base_url, target, max_results=max(40, max_per_source_year * 5))
+            captures = cdx_query(
+                src.base_url,
+                target,
+                max_results=max(40, max_per_source_year * 5),
+                request_timeout_seconds=cdx_request_timeout_seconds,
+                retries=cdx_retries,
+            )
         except RuntimeError as exc:
             log_step(f"Year {year}: {src.blog_name} query failed ({exc})")
             continue
@@ -592,6 +612,18 @@ def main() -> None:
     parser.add_argument("--day", type=int, default=today.day, help="Day to query (default: current day)")
     parser.add_argument("--pause", type=float, default=0.15, help="Seconds to pause between replay fetches (default: 0.15)")
     parser.add_argument(
+        "--cdx-timeout",
+        type=int,
+        default=10,
+        help="Per-request timeout in seconds for CDX API calls (default: 10).",
+    )
+    parser.add_argument(
+        "--cdx-retries",
+        type=int,
+        default=2,
+        help="Retry attempts for CDX API calls before skipping a source (default: 2).",
+    )
+    parser.add_argument(
         "--discover-sources",
         action="store_true",
         help="Discover additional blog sources from seed pages to increase variety.",
@@ -689,6 +721,8 @@ def main() -> None:
             max_per_source_year=args.max_per_source_year,
             request_pause_seconds=args.pause,
             sources=run_sources,
+            cdx_request_timeout_seconds=max(1, args.cdx_timeout),
+            cdx_retries=max(1, args.cdx_retries),
         )
         all_entries.extend(year_entries)
         log_step(f"Year {year} complete: running total is {len(all_entries)} entries")
