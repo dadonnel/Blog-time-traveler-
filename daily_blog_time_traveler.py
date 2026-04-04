@@ -109,7 +109,13 @@ def fetch_json_url_params(base_url: str, params: dict[str, str], timeout: int = 
     return fetch_json(f"{base_url}?{query}", timeout=timeout)
 
 
-def fetch_text(url: str, timeout: int = 30, retries: int = 2):
+def fetch_text(
+    url: str,
+    timeout: int = 30,
+    retries: int = 2,
+    max_bytes: int = 200_000,
+    use_stream_read: bool = False,
+):
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     last_error: Exception | None = None
     for attempt in range(retries):
